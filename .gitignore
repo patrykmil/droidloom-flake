@@ -1,0 +1,8 @@
+/result
+/result-*
+/.work/
+*.apk
+*.img
+*.zip
+*.tar
+*.tar.*

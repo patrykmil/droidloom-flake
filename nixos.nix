@@ -22,6 +22,15 @@ let
 
   setup = pkgs.writeShellScript "droidloom-setup" ''
     set -euo pipefail
+    conflict=0
+    for name in ${lib.escapeShellArgs (builtins.attrNames compatLinks)}; do
+      if [[ $(readlink -- "/usr/$name" || true) != "/etc/droidloom/compat/$name" ]]; then
+        echo "Droidloom needs /usr/$name -> /etc/droidloom/compat/$name; the existing path, if any, was left untouched." >&2
+        conflict=1
+      fi
+    done
+    (( conflict == 0 )) || exit 1
+
     uid=$(id -u -- ${escapeShellArg cfg.user})
     args=(setup --uid "$uid" --data-home ${escapeShellArg "${home}/.local/share"}
           --state-home ${escapeShellArg "${home}/.local/state"})
@@ -44,26 +53,9 @@ let
     fi
 
     "$helper" "''${args[@]}"
-    changed=$(
-      set -e
-      cd /etc/droidloom
-      exec 9>> setup.lock
-      flock -x 9
-      previous=$(${jq} -c . cell.json)
-      selected=$(${jq} -c --arg vanilla "$vanilla" --arg google "$google" --arg addon "$addon" \
-        -f ${./select-storage.jq} cell.json)
-      if [[ $previous != "$selected" ]]; then
-        next=$(mktemp .cell.XXXXXX)
-        trap 'rm -f -- "$next"' EXIT
-        printf '%s\n' "$selected" > "$next"
-        chmod 0644 "$next"
-        mv -T -- "$next" cell.json
-        echo yes
-      fi
-    )
-    if [[ $changed == yes ]]; then
-      exec "$helper" "''${args[@]}"
-    fi
+    cd /etc/droidloom
+    exec ${lib.getExe pkgs.bash} ${./switch-storage.sh} ${./select-storage.jq} \
+      "$vanilla" "$google" "$addon" "$helper" "''${args[@]}"
   '';
 
   # Keep the helper's spec intact: `droidloomctl start` would reset a backend
@@ -84,58 +76,32 @@ let
     exec ${droidloom}/usr/bin/droidloom-supervisor "$@"
   '';
 
-  # Upstream binaries and the generated cell specification refer to absolute
-  # /usr paths. NixOS has no /usr tree, so expose the packaged files there.
-  binLinks = map (name: "L+ /usr/bin/${name} - - - - ${droidloom}/usr/bin/${name}") [
-    "droidloom-applications"
-    "droidloom-audio"
-    "droidloom-devices"
-    "droidloom-doctor"
-    "droidloom-gpu-server"
-    "droidloom-supervisor"
-    "droidloom-wayland"
-    "droidloomctl"
-    "droidloomd"
-  ];
-
-  toolLinks = map ({ name, path }: "L+ /usr/bin/${name} - - - - ${path}") [
-    {
-      name = "getent";
-      path = "${pkgs.glibc.getent}/bin/getent";
-    }
-    {
-      name = "pkexec";
-      path = "${config.security.wrapperDir}/pkexec";
-    }
-    {
-      name = "runuser";
-      path = "${pkgs.util-linux}/bin/runuser";
-    }
-    {
-      name = "nsenter";
-      path = "${pkgs.util-linux}/bin/nsenter";
-    }
-    {
-      name = "systemctl";
-      path = "${pkgs.systemd}/bin/systemctl";
-    }
-    {
-      name = "systemd-run";
-      path = "${pkgs.systemd}/bin/systemd-run";
-    }
-    {
-      name = "timeout";
-      path = "${pkgs.coreutils}/bin/timeout";
-    }
-    {
-      name = "adb";
-      path = "${pkgs.android-tools}/bin/adb";
-    }
-    {
-      name = "cat";
-      path = "${pkgs.coreutils}/bin/cat";
-    }
-  ];
+  # Stable destinations let upgrades update the private link farm, not /usr.
+  compatLinks =
+    lib.genAttrs [
+      "bin/droidloom-applications"
+      "bin/droidloom-audio"
+      "bin/droidloom-devices"
+      "bin/droidloom-doctor"
+      "bin/droidloom-gpu-server"
+      "bin/droidloom-supervisor"
+      "bin/droidloom-wayland"
+      "bin/droidloomctl"
+      "bin/droidloomd"
+      "lib/droidloom"
+      "share/droidloom"
+    ] (name: "${droidloom}/usr/${name}")
+    // {
+      "bin/getent" = "${pkgs.glibc.getent}/bin/getent";
+      "bin/pkexec" = "${config.security.wrapperDir}/pkexec";
+      "bin/runuser" = "${pkgs.util-linux}/bin/runuser";
+      "bin/nsenter" = "${pkgs.util-linux}/bin/nsenter";
+      "bin/systemctl" = "${pkgs.systemd}/bin/systemctl";
+      "bin/systemd-run" = "${pkgs.systemd}/bin/systemd-run";
+      "bin/timeout" = "${pkgs.coreutils}/bin/timeout";
+      "bin/adb" = "${pkgs.android-tools}/bin/adb";
+      "bin/cat" = "${pkgs.coreutils}/bin/cat";
+    };
 in
 {
   options.services.droidloom = {
@@ -202,13 +168,10 @@ in
       pkgs.nftables
     ];
 
-    systemd.tmpfiles.rules =
-      binLinks
-      ++ toolLinks
-      ++ [
-        "L+ /usr/lib/droidloom - - - - ${droidloom}/usr/lib/droidloom"
-        "L+ /usr/share/droidloom - - - - ${droidloom}/usr/share/droidloom"
-      ];
+    environment.etc."droidloom/compat".source = pkgs.linkFarm "droidloom-compat" compatLinks;
+    systemd.tmpfiles.rules = map (name: "L /usr/${name} - - - - /etc/droidloom/compat/${name}") (
+      builtins.attrNames compatLinks
+    );
 
     systemd.services.droidloom-setup = {
       description = "Configure Droidloom for ${cfg.user}";
@@ -218,7 +181,10 @@ in
         "local-fs.target"
         "systemd-tmpfiles-setup.service"
       ];
-      path = [ pkgs.util-linux ];
+      path = [
+        pkgs.jq
+        pkgs.util-linux
+      ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;

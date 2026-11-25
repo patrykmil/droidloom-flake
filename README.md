@@ -51,6 +51,12 @@ session, without sudo. `droidloomctl applications` lists available Android apps.
 When migrating from another Droidloom NixOS/Home Manager configuration, remove
 its imports first so both sets of services are not defined at once.
 
+Upstream requires a few `/usr` paths. The module creates missing links to
+`/etc/droidloom/compat` and never overwrites an existing file or link in `/usr`.
+If setup reports a conflict, inspect it with `readlink /usr/path` and only
+remove links you own, such as links left behind by a previous Droidloom
+module. Reapply the NixOS configuration afterward.
+
 ## Optional Google apps (GApps)
 
 Follow [upstream's add-on build instructions](https://github.com/denialwm/droidloom/blob/572e1c51c5caf75183efe25ad811f98c1268bf56/docs/BUILDING.md#optional-google-apps)
@@ -75,10 +81,17 @@ services.droidloom.gapps = {
 ```
 
 Back up first (`droidloomctl backup ~/droidloom-backup.tar.zst`) and stop the
-cell before switching system generations. Enabling GApps selects fresh
+cell before switching system generations. If storage provisioning fails,
+the setup service restores the previous storage selection. Enabling GApps selects
 `/var/lib/droidloom/users/<uid>/data-gapps` storage by default; disabling it
 selects the original `/var/lib/droidloom/users/<uid>/data`. Both directories
 are kept. To reuse existing installations at other paths, set
 `services.droidloom.dataDirectory` for vanilla and
 `services.droidloom.gapps.dataDirectory` for GApps. Do not point both at the
 same storage or restore a vanilla backup onto GApps storage.
+
+## License
+
+The packaging code and documentation in this repository are [MIT-licensed](LICENSE).
+Droidloom and its dependencies retain their upstream licenses. Google apps are
+not distributed by this flake.
